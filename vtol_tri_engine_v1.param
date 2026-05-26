@@ -1,0 +1,242 @@
+
+# VTOL Tri-Engine Control System - ArduPilot Parameter File
+#
+# Target hardware:  Holybro / N-Factory F405-WING flight controller
+#                   running ArduPlane 4.5 or newer (QuadPlane tilt-rotor build)
+# Target simulator: ArduPilot SITL with frame "quadplane-tilttri"
+# Airframe:         tilt-tri VTOL, 0.8 m wingspan, 2.7 kg
+#                   - 2 front motors with tilt servos (0 deg horizontal,
+#                     ~90 deg vertical) used for both lift and forward thrust
+#                   - 1 rear motor fixed vertical, lift only, OFF outside VTOL
+#                   - control surfaces: 2 ailerons, 2 elevators, 1 rudder
+#
+# This file is the static, parameter-level half of the implementation. The
+# dynamic, mode-switching half lives in vtol_modes.lua, which references
+# many of the parameters set here. See the comments in that script for the
+# mapping between the spec's three pilot modes and ArduPilot's flight modes.
+
+# -----------------------------------------------------------------------------
+# AIRFRAME / FRAME GEOMETRY
+# -----------------------------------------------------------------------------
+# Implements the airframe described in spec section 1: two tilting front
+# motors plus one fixed vertical rear motor. ArduPilot calls this a
+# "tri-frame tiltrotor" and supports it natively under QuadPlane.
+
+Q_ENABLE,1
+# Q_ENABLE  = 1 turns on the QuadPlane (VTOL) layer of ArduPlane. Without
+# this, only fixed-wing flight modes are available.
+
+Q_FRAME_CLASS,7
+# Q_FRAME_CLASS = 7 = "Tri".  This tells the motor mixer there are exactly
+# three lift motors, arranged in the tri-layout (2 front + 1 rear).
+
+Q_FRAME_TYPE,1
+# Q_FRAME_TYPE = 1 = "X" geometry. For a tri-frame this mostly affects yaw
+# direction conventions; the choice is rarely critical, but "X" is the
+# default convention used by SITL's quadplane-tilttri model.
+
+Q_TILT_MASK,3
+# Q_TILT_MASK is a bitmask of which motors tilt.  Bit 0 = motor 1, bit 1 =
+# motor 2.  Value 3 (binary 011) means motors 1 and 2 (the two front
+# motors) tilt; motor 3 (the rear) stays fixed - exactly matching the spec.
+
+Q_TILT_TYPE,2
+# Q_TILT_TYPE = 2 = "Vectored Yaw".  This activates the spec's section 2
+# Mode 2 yaw mechanism: the two front motors tilt to slightly different
+# angles (e.g. 95 deg and 85 deg) and the differential horizontal thrust
+# component yaws the aircraft. Without this setting yaw in VTOL would be
+# attempted by differential motor torque alone, which is weak on a tri.
+
+Q_TILT_RATE_UP,60
+Q_TILT_RATE_DN,90
+# Tilt servo travel rates, deg/sec.  UP = going from horizontal back to
+# vertical (forward-flight -> VTOL transition).  DN = going from vertical
+# to horizontal (VTOL -> forward-flight transition).  Faster DN than UP
+# is conventional: forward transitions are aided by aero authority gained
+# as the wings load up, so they can be aggressive; back-transitions need
+# more time for the aircraft to bleed off airspeed.
+
+Q_TILT_MAX,60
+# Maximum tilt in degrees when the QuadPlane is asked to provide forward
+# thrust assist during a stabilised VTOL mode (only relevant in some
+# specific modes like QSTABILIZE; harmless for our use).
+
+
+# -----------------------------------------------------------------------------
+# TRANSITION (spec section 3)
+# -----------------------------------------------------------------------------
+# The spec's blending formula
+#     k = tilt_angle / max_tilt
+#     Roll  = k*(thrust differential) + (1-k)*(ailerons)
+#     Pitch = k*(thrust vector)       + (1-k)*(elevator)
+# is implemented by ArduPilot's tilt-rotor mixer automatically; these
+# parameters tune WHEN and HOW FAST that blend happens.
+
+Q_ASSIST_SPEED,8
+# Minimum forward airspeed (m/s) at which the airframe is considered to
+# have aerodynamic authority.  Below this, in fixed-wing modes, the VTOL
+# motors auto-engage to assist (prevents a stall while transitioning).
+# 8 m/s is conservative for a 0.8 m / 2.7 kg airframe; tune up if the
+# real aircraft can sustain fixed-wing flight at lower speeds.
+
+Q_TRANSITION_MS,5000
+# Hard ceiling on transition duration (ms).  If forward acceleration is
+# slow (weak motor, headwind), ArduPilot will still complete the tilt
+# rotation within this time and let the aero surfaces take over.
+
+ARSPD_FBW_MIN,9
+ARSPD_FBW_MAX,22
+# Allowable airspeed range for FBWA fixed-wing flight (m/s).  Throttle is
+# auto-managed in some modes to keep airspeed inside this band.  Set
+# slightly above stall and below the airframe's safe cruise ceiling.
+
+
+# -----------------------------------------------------------------------------
+# ATTITUDE LIMITS (spec section 2 Mode 3)
+# -----------------------------------------------------------------------------
+# Default 20 degrees roll and pitch envelope. The Lua script rewrites
+# these in real time when in Mode 3, scaling them with the safety-throttle
+# slider; these defaults apply when the script is inactive or in Modes
+# 1 / 2.
+#
+# IMPORTANT: As of ArduPlane 4.5 these are in DEGREES, not the older
+# LIM_ROLL_CD / LIM_PITCH_MAX / LIM_PITCH_MIN centidegree pairs.
+
+ROLL_LIMIT_DEG,20
+PTCH_LIM_MAX_DEG,20
+PTCH_LIM_MIN_DEG,-20
+
+
+# -----------------------------------------------------------------------------
+# DESCENT PROTECTION (spec section 2 Mode 2)
+# -----------------------------------------------------------------------------
+# Spec demands:
+#   * Downward velocity automatically limited
+#   * Minimum thrust enforced to avoid free fall
+
+Q_LAND_SPEED,50
+# Final-touchdown descent rate in QLAND (cm/s).  50 cm/s = a gentle landing.
+
+Q_PILOT_SPD_DN,150
+# Maximum pilot-commanded descent rate in VTOL modes (cm/s).  Even at full
+# down stick, the QHOVER controller will not let the aircraft fall faster
+# than this.  1.5 m/s is comfortable; bring it down for a heavier airframe.
+
+Q_M_SPIN_MIN,0.15
+Q_M_SPIN_ARM,0.10
+# Motor spin floors as a fraction of full throttle:
+#   Q_M_SPIN_MIN = lowest throttle the motors will ever output while
+#                  armed and flying.  Prevents a "zero thrust" condition
+#                  during aggressive descents (the free-fall the spec
+#                  warns about).
+#   Q_M_SPIN_ARM = lowest throttle on the ground when armed but idle.
+
+
+# -----------------------------------------------------------------------------
+# RC CHANNEL MAPPING
+# -----------------------------------------------------------------------------
+# The Lua script reads three custom-purpose channels: 6 (safety-throttle
+# slider), 7 (VTOL switch), 8 (Safety switch).  We must make sure
+# ArduPilot does NOT auto-bind these channels to any built-in function,
+# otherwise the script and ArduPilot would fight over them.
+#
+# RCx_OPTION = 0 means "no built-in action" = pure passthrough.  The Lua
+# script then reads them via rc:get_pwm(ch).
+
+RC6_OPTION,0
+RC7_OPTION,0
+RC8_OPTION,0
+
+FLTMODE_CH,0
+# FLTMODE_CH normally tells ArduPilot which RC channel selects flight mode
+# (default = 5).  We set it to 0 to disable that mechanism entirely.  This
+# is critical: without it, ArduPilot would read channel 5 every loop and
+# re-assert its preferred mode, overriding whatever the Lua script just set.
+
+# FLTMODE1..6 are the modes ArduPilot would select if FLTMODE_CH were
+# active.  Since we disabled FLTMODE_CH above, these are dormant; we still
+# fill them with the modes the Lua script uses, so if someone re-enables
+# FLTMODE_CH for debugging the behaviour is reasonable.
+FLTMODE1,0    # MANUAL
+FLTMODE2,5    # FBWA
+FLTMODE3,17   # QSTABILIZE
+FLTMODE4,18   # QHOVER
+FLTMODE5,22   # QAUTOTUNE
+FLTMODE6,1    # CIRCLE
+
+
+# -----------------------------------------------------------------------------
+# FAILSAFES (spec section 4 "Loss of signal")
+# -----------------------------------------------------------------------------
+# Spec demands:
+#   VTOL on loss-of-signal      -> stabilize and descend slowly
+#   Fixed-wing on loss-of-signal -> level wings, slight climb, loiter
+#   If altimeter available       -> attempt return-to-VTOL if altitude allows
+# ArduPilot's failsafe state machine implements all of this when configured
+# as below; no Lua code is required.
+
+THR_FAILSAFE,1
+# 1 = enable RC failsafe based on RC throttle channel dropping below
+# THR_FS_VALUE (default 950 us), which is how most receivers signal "lost
+# RC link".
+
+FS_SHORT_ACTN,0
+FS_SHORT_TIMEOUT,1.5
+# Short failsafe (link lost briefly).  Action 0 = continue current mode.
+# 1.5 s is short enough to react to a real outage but long enough to
+# ride out brief RC glitches.
+
+FS_LONG_ACTN,1
+FS_LONG_TIMEOUT,5.0
+# Long failsafe (link still gone after 5 s).  Action 1 = RTL (return to
+# launch). Combined with Q_RTL_MODE below, in VTOL this becomes QRTL
+# (a vertical RTL with slow descent), which matches the spec.
+
+Q_RTL_MODE,1
+# When RTL fires and the aircraft is in VTOL, use QRTL (vertical) instead
+# of the fixed-wing RTL pattern.  Required to satisfy the spec's
+# "stabilize and descend slowly" for VTOL.
+
+FS_GCS_ENABL,1
+# Treat loss of GCS (telemetry from Mission Planner) the same way as
+# loss of RC.  Important for missions flown out of RC range.
+
+
+# -----------------------------------------------------------------------------
+# LUA SCRIPTING
+# -----------------------------------------------------------------------------
+# Required for vtol_modes.lua to run.  Changes here REQUIRE A REBOOT to
+# take effect.
+
+SCR_ENABLE,1
+# 1 = enable the on-board Lua interpreter.
+
+SCR_HEAP_SIZE,102400
+# Bytes of heap reserved for Lua.  100 KB is generous for our small script
+# but leaves room to grow.  The F405-WING has enough RAM for this.
+
+SCR_VM_I_COUNT,10000
+# Maximum Lua VM instructions per script step before ArduPilot interrupts
+# the script (prevents an infinite loop in user code from freezing flight
+# control).  10 000 is the recommended default.
+
+
+# -----------------------------------------------------------------------------
+# GYRO FILTERING (spec section 5 "All gyro inputs must be filtered")
+# -----------------------------------------------------------------------------
+# Cutoff frequencies (Hz) for the low-pass filter applied to raw IMU
+# samples before they reach the attitude controller. Lower = smoother
+# but laggier; higher = more responsive but more noise.
+
+INS_GYRO_FILTER,20
+INS_ACCEL_FILTER,10
+
+
+# -----------------------------------------------------------------------------
+# ARMING CHECKS
+# -----------------------------------------------------------------------------
+# 1 = run all pre-arm safety checks (battery, GPS lock, AHRS, RC,
+# parameters within sane ranges, etc.).  Leave at 1; never relax this for
+# real flight.
+
+ARMING_CHECK,1
